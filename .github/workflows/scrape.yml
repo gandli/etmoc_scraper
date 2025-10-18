@@ -17,23 +17,25 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v1
+
       - name: Install system dependencies for Playwright
         uses: microsoft/playwright-github-action@v1
         with:
           install-deps: true
 
-      - name: Install Python dependencies
+      - name: Install Python dependencies with uv
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          uv pip install -r requirements.txt
 
-      - name: Install Playwright Browsers
+      - name: Install Playwright Browsers (via uv)
         run: |
-          python -m playwright install
+          uv run playwright install
 
-      - name: Run scraper (catalog detail, 1 page)
+      - name: Run scraper (catalog detail, 1 page) via uv
         run: |
-          python playwright_scrape_etmoc.py --source catalog --action detail --pages 1 --out etmoc_output
+          uv run python playwright_scrape_etmoc.py --source catalog --action detail --pages 1 --out etmoc_output
 
       - name: Upload results
         uses: actions/upload-artifact@v4
