@@ -15,7 +15,7 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
-# 集中管理所有路径选择器与分页常量（顶部定义，避免运行期未定义）
+# 选择器与分页常量集中管理（统一调整、避免运行期未定义与分散维护）
 SELECTORS = {
     "catalog_left_col": "body > div.container > div.row > div.col-8",
     "product_links_in_catalog": 'body > div.container > div.row > div.col-8 > ul a[href*="Product?Id="]',
@@ -23,6 +23,7 @@ SELECTORS = {
     "image": "div.proImg img[src]",
     "pro_bar": "div.proBars div.proBar",
     "wait_product_ready": "div.brand-title > h2, h1, .title, .product-title",
+    "total_pages_anchor": "body > div.container > nav > ul > li:nth-child(12) > a",
 }
 PAGINATION_CANDIDATES = [
     'nav.pagination a[rel="next"]',
@@ -34,6 +35,10 @@ NEXT_TEXT_REGEX = r"(下一页|下页|›|»)"
 
 
 def select_next_page_href(soup: BeautifulSoup):
+    """解析目录页的“下一页”链接。
+    优先匹配结构化分页选择器，其次在左列容器文本中兜底识别“下一页/下页/›/»”。
+    返回相对或绝对 href；无法识别时返回 None。
+    """
     root = soup.select_one(SELECTORS["catalog_left_col"]) or soup
     # 优先使用精确的分页候选选择器
     for sel in PAGINATION_CANDIDATES:
@@ -422,6 +427,53 @@ def wait_for_product_ready(page, timeout: int = 15000):
     wait_for_selector_safe(page, SELECTORS["wait_product_ready"], timeout)
 
 
+def get_total_pages_number(page, root_url: str, timeout: int = 15000) -> int:
+    """跳转目录首页并读取总页数。
+    优先从 `SELECTORS["total_pages_anchor"]` 的文本或 href 提取页号；
+    若站点结构改变或锚点不可用，则回退扫描导航中的分页链接并取最大页号。
+    返回 >= 1 的整数；无法识别时返回 0（后续逻辑会视为“未知上限”）。
+    """
+    try:
+        page.goto(root_url, wait_until="domcontentloaded")
+        wait_for_selector_safe(page, SELECTORS["total_pages_anchor"], timeout)
+    except PlaywrightTimeoutError:
+        page.wait_for_timeout(800)
+    # 尝试直接从锚点读取
+    try:
+        a = page.query_selector(SELECTORS["total_pages_anchor"])  # type: ignore
+        if a:
+            txt = text_clean(a.inner_text())
+            m = re.search(r"\d+", txt)
+            if m:
+                return int(m.group(0))
+            href = a.get_attribute("href") or ""
+            m2 = re.search(r"page=(\d+)", href)
+            if m2:
+                return int(m2.group(1))
+    except Exception:
+        pass
+    # 回退：扫描导航中的所有分页链接，取最大页号
+    html = page.content()
+    soup = BeautifulSoup(html, "html.parser")
+    last_num = 0
+    for a in soup.select("body > div.container nav ul li a[href]"):
+        t = text_clean(a.get_text(" "))
+        m1 = re.search(r"\d+", t)
+        if m1:
+            try:
+                last_num = max(last_num, int(m1.group(0)))
+            except Exception:
+                pass
+        href = a.get("href", "")
+        m2 = re.search(r"page=(\d+)", href)
+        if m2:
+            try:
+                last_num = max(last_num, int(m2.group(1)))
+            except Exception:
+                pass
+    return last_num
+
+
 def collect_catalog_links(
     page,
     pages_limit: int = 0,
@@ -431,15 +483,33 @@ def collect_catalog_links(
     incremental: bool = False,
     out_dir: str | None = None,
 ):
+    """收集目录页中的产品详情链接（去重），支持总页数限制与增量模式。
+    参数：
+    - pages_limit：最多遍历的页数；0 表示不限（仍受站点总页数约束）。
+    - delay：每页间隔秒数。
+    - limit：最多收集的链接条数；0 表示不限。
+    - start_page：起始页，支持整数或 'latest'；'latest' 在有检查点时从上次完成页+1继续。
+    - incremental：增量模式；默认从第 1 页开始，结合 'latest' 可继续深页。
+    - out_dir：输出目录；用于保存检查点 `catalog_checkpoint.json`。
+    行为：
+    - 自动检测目录总页数，遍历范围为 `min(pages_limit(若>0), total_pages)`。
+    - `numeric_mode` 为 True（设置了起始页或启用增量）时使用 `?page=N` 方式跳转，否则按“下一页”链接跟踪。
+    - 结束时在增量模式写入 `{"last_page": N}` 检查点。
+    返回：
+    - 去重后的产品详情链接列表（绝对 URL）。
+    """
     root_url = f"{BASE}/Firms/Brands"
     checkpoint_path = (
         os.path.join(out_dir, "catalog_checkpoint.json") if out_dir else None
     )
-    numeric_mode = start_page is not None or incremental
+    numeric_mode = start_page is not None or incremental  # 数值分页模式：显式起始页或增量模式
 
     def goto_and_ready(url: str):
         page.goto(url, wait_until="domcontentloaded")
         wait_for_catalog_ready(page)
+
+    # 总页数检测（目录首页）
+    total_pages = get_total_pages_number(page, root_url)
 
     # 计算起始页（增量默认从第一页开始；latest 显式从检查点继续）
     if numeric_mode:
@@ -472,6 +542,9 @@ def collect_catalog_links(
     pages_processed = 0
 
     while True:
+        # 若已超过总页数，终止
+        if total_pages and page_index > total_pages:
+            break
         if numeric_mode:
             page_url = f"{root_url}?page={page_index}"
             goto_and_ready(page_url)
@@ -480,7 +553,10 @@ def collect_catalog_links(
         anchors = soup.select(SELECTORS["product_links_in_catalog"])
         hrefs = [a["href"] for a in anchors if a.has_attr("href")]
         abs_links = to_abs(page.url, hrefs)
-        print(f"目录页 {page_index}，产品链接 {len(abs_links)} 条")
+        if total_pages:
+            print(f"目录页 {page_index}/{total_pages}，产品链接 {len(abs_links)} 条")
+        else:
+            print(f"目录页 {page_index}，产品链接 {len(abs_links)} 条")
         for u in abs_links:
             if u in seen:
                 continue
@@ -512,7 +588,7 @@ def collect_catalog_links(
             page_index += 1
         time.sleep(delay)
 
-    # 增量模式：记录最后处理页
+    # 增量检查点：记录最后完成页号（数值分页时为当前索引-1）
     if incremental and checkpoint_path:
         try:
             last_page_done = page_index - (1 if numeric_mode else 0)
@@ -547,6 +623,14 @@ def crawl_catalog_with_playwright(
     start_page: int | str | None = None,
     incremental: bool = False,
 ):
+    """目录源：先收集产品链接，再解析详情并下载图片。
+    参数：同 `collect_catalog_links` 的分页/起始/增量语义；另含 `limit/delay/out_dir`。
+    行为：
+    - 链接收集后使用进度条解析详情；统一在末尾下载第一张图片以避免阻塞。
+    - 非增量模式清理输出目录；增量模式仅确保目录存在。
+    输出：
+    - `out/products_catalog.json`、`out/products_catalog.csv`，图片保存在 `out/images/`。
+    """
     if incremental:
         os.makedirs(out_dir, exist_ok=True)
         os.makedirs(os.path.join(out_dir, "images"), exist_ok=True)
@@ -598,6 +682,12 @@ def crawl_catalog_links(
     start_page: int | str | None = None,
     incremental: bool = False,
 ):
+    """仅收集目录页的产品链接（不解析详情），用于快速预览或链路检查。
+    行为：
+    - 遵循总页数上限与数值/非数值两种分页策略。
+    输出：
+    - 写入 `out/product_links.json`，字段：`{"count": <数量>, "links": [绝对URL...]}`。
+    """
     if incremental:
         os.makedirs(out_dir, exist_ok=True)
         os.makedirs(os.path.join(out_dir, "images"), exist_ok=True)
@@ -662,7 +752,7 @@ if __name__ == "__main__":
     )
     args = ap.parse_args()
 
-    # 计算分页上限：--pages 优先；支持整数或 all；默认 1 页
+    # 计算分页上限：`--pages` 优先；支持整数或 `all`；默认 1 页。`all` 仍受站点总页数边界约束。
     if args.pages is None:
         pages_limit = 1
     else:
@@ -700,4 +790,3 @@ if __name__ == "__main__":
             limit=args.limit or None, delay=args.delay, out_dir=args.out
         )
 
-# 集中管理所有路径选择器，方便后续统一修改

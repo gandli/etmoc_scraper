@@ -40,6 +40,24 @@ def dump_product_html(url: str, product_id: int):
             page.wait_for_load_state('networkidle')
         except PlaywrightTimeoutError:
             page.wait_for_timeout(1200)
+        # go to brands page
+        brands_url = f"{BASE}/Firms/Brands"
+        page.goto(brands_url, wait_until='domcontentloaded')
+        try:
+            page.wait_for_selector('body > div.container > div.row > div.col-8, body > div.container > nav', timeout=15000)
+        except PlaywrightTimeoutError:
+            page.wait_for_timeout(1200)
+        brands_html = page.content()
+        brands_html_path = os.path.join(OUT_DIR, 'debug_brands.html')
+        with open(brands_html_path, 'w', encoding='utf-8') as f:
+            f.write(brands_html)
+        brands_png_path = os.path.join(OUT_DIR, 'debug_brands.png')
+        try:
+            page.screenshot(path=brands_png_path, full_page=True)
+        except Exception:
+            pass
+        print(f"Saved Brands: {brands_html_path}\nScreenshot: {brands_png_path}")
+
         # go to product page
         page.goto(url, wait_until='domcontentloaded')
         try:
