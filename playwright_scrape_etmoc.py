@@ -424,6 +424,10 @@ def collect_catalog_links(
                 break
             seen.add(u)
             links.append(u)
+        # 当前页处理完成，更新进度
+        if pb:
+            pb.update(1)
+        # 处理完后再进行上限和翻页判断
         if limit and len(links) >= limit:
             break
         if pages_limit and page_index >= pages_limit:
@@ -435,8 +439,6 @@ def collect_catalog_links(
         page.goto(next_url, wait_until="domcontentloaded")
         wait_for_catalog_ready(page)
         page_index += 1
-        if pb:
-            pb.update(1)
         time.sleep(delay)
     if pb:
         pb.close()
