@@ -33,6 +33,28 @@ PAGINATION_CANDIDATES = [
 NEXT_TEXT_REGEX = r"(下一页|下页|›|»)"
 
 
+def select_next_page_href(soup: BeautifulSoup):
+    root = soup.select_one(SELECTORS["catalog_left_col"]) or soup
+    # 优先使用精确的分页候选选择器
+    for sel in PAGINATION_CANDIDATES:
+        a = root.select_one(sel)
+        if a and a.has_attr("href"):
+            return a["href"]
+    # 结构化兜底：分页容器最后一个链接
+    a2 = root.select_one(".pagination a[href]:last-child")
+    if a2 and a2.has_attr("href"):
+        href = a2["href"]
+        if href and not re.search(r"javascript:", href, re.I):
+            return href
+    # 文本兜底：限制在左列 root 中查找“下一页/下页/›/»”
+    for a in root.find_all("a", href=True):
+        txt = text_clean(a.get_text(" "))
+        if re.search(NEXT_TEXT_REGEX, txt):
+            return a["href"]
+    return None
+
+
+
 class ProgressBar:
     def __init__(self, total: int, prefix: str = ""):
         self.total = max(int(total or 0), 1)
