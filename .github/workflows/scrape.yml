@@ -8,6 +8,9 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: etmoc_scraper
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -21,9 +24,9 @@ jobs:
         uses: astral-sh/setup-uv@v1
 
 
-      - name: Install Python dependencies with uv
+      - name: Install Python dependencies with uv (system)
         run: |
-          uv pip install -r requirements.txt
+          uv sync --frozen
 
       - name: Install Playwright Browsers (via uv)
         run: |
@@ -37,4 +40,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: etmoc_output
-          path: etmoc_output
+          path: etmoc_scraper/etmoc_output
