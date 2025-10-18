@@ -404,19 +404,13 @@ def collect_catalog_links(
     seen = set()
     links = []
     page_index = 1
-    pb = tqdm(
-        total=pages_limit if pages_limit else None,
-        desc="分页进度",
-        unit="页",
-        dynamic_ncols=True,
-    )
     while True:
         html = page.content()
         soup = BeautifulSoup(html, "html.parser")
         anchors = soup.select(SELECTORS["product_links_in_catalog"])
         hrefs = [a["href"] for a in anchors if a.has_attr("href")]
         abs_links = to_abs(page.url, hrefs)
-        tqdm.write(f"目录页 {page_index}，产品链接 {len(abs_links)} 条")
+        print(f"目录页 {page_index}，产品链接 {len(abs_links)} 条")
         for u in abs_links:
             if u in seen:
                 continue
@@ -424,9 +418,7 @@ def collect_catalog_links(
                 break
             seen.add(u)
             links.append(u)
-        # 当前页处理完成，更新进度
-        if pb:
-            pb.update(1)
+        # 当前页处理完成
         # 处理完后再进行上限和翻页判断
         if limit and len(links) >= limit:
             break
@@ -440,8 +432,6 @@ def collect_catalog_links(
         wait_for_catalog_ready(page)
         page_index += 1
         time.sleep(delay)
-    if pb:
-        pb.close()
     return links
 
 
