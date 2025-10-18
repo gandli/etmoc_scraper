@@ -7,7 +7,7 @@ on:
 
 jobs:
   scrape:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -20,10 +20,6 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v1
 
-      - name: Install system dependencies for Playwright
-        uses: microsoft/playwright-github-action@v1
-        with:
-          install-deps: true
 
       - name: Install Python dependencies with uv
         run: |
@@ -31,7 +27,7 @@ jobs:
 
       - name: Install Playwright Browsers (via uv)
         run: |
-          uv run playwright install
+          uv run python -m playwright install --with-deps
 
       - name: Run scraper (catalog detail, 1 page) via uv
         run: |
