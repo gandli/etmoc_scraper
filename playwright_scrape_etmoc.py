@@ -423,15 +423,58 @@ def wait_for_product_ready(page, timeout: int = 15000):
 
 
 def collect_catalog_links(
-    page, pages_limit: int = 0, delay: float = 0.7, limit: int = 0
+    page,
+    pages_limit: int = 0,
+    delay: float = 0.7,
+    limit: int = 0,
+    start_page: int | str | None = None,
+    incremental: bool = False,
+    out_dir: str | None = None,
 ):
-    start_url = f"{BASE}/Firms/Brands"
-    page.goto(start_url, wait_until="domcontentloaded")
-    wait_for_catalog_ready(page)
+    root_url = f"{BASE}/Firms/Brands"
+    checkpoint_path = (
+        os.path.join(out_dir, "catalog_checkpoint.json") if out_dir else None
+    )
+    numeric_mode = start_page is not None or incremental
+
+    def goto_and_ready(url: str):
+        page.goto(url, wait_until="domcontentloaded")
+        wait_for_catalog_ready(page)
+
+    # 计算起始页（增量默认从第一页开始；latest 显式从检查点继续）
+    if numeric_mode:
+        sp = 1
+        if isinstance(start_page, str):
+            st = start_page.strip().lower()
+            if st == "latest" and checkpoint_path and os.path.exists(checkpoint_path):
+                try:
+                    with open(checkpoint_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    last_page = int(data.get("last_page", 0))
+                    sp = last_page + 1 if last_page > 0 else 1
+                except Exception:
+                    sp = 1
+            elif st.isdigit():
+                try:
+                    sp = int(st)
+                except Exception:
+                    sp = 1
+        elif isinstance(start_page, int):
+            sp = start_page
+        # incremental 且未显式设置 start_page 时，默认从 1 开始
+        page_index = max(sp, 1)
+    else:
+        goto_and_ready(root_url)
+        page_index = 1
+
     seen = set()
-    links = []
-    page_index = 1
+    links: list[str] = []
+    pages_processed = 0
+
     while True:
+        if numeric_mode:
+            page_url = f"{root_url}?page={page_index}"
+            goto_and_ready(page_url)
         html = page.content()
         soup = BeautifulSoup(html, "html.parser")
         anchors = soup.select(SELECTORS["product_links_in_catalog"])
@@ -445,20 +488,38 @@ def collect_catalog_links(
                 break
             seen.add(u)
             links.append(u)
-        # 当前页处理完成
-        # 处理完后再进行上限和翻页判断
+
+        # 当前页处理完成后的退出条件
         if limit and len(links) >= limit:
             break
-        if pages_limit and page_index >= pages_limit:
-            break
-        next_href = select_next_page_href(soup)
-        if not next_href:
-            break
-        next_url = urljoin(page.url, next_href)
-        page.goto(next_url, wait_until="domcontentloaded")
-        wait_for_catalog_ready(page)
-        page_index += 1
+        if pages_limit:
+            if numeric_mode and (pages_processed + 1) >= pages_limit:
+                pages_processed += 1
+                break
+            if not numeric_mode and page_index >= pages_limit:
+                break
+
+        # 下一页跳转
+        if numeric_mode:
+            pages_processed += 1
+            page_index += 1
+        else:
+            next_href = select_next_page_href(soup)
+            if not next_href:
+                break
+            next_url = urljoin(page.url, next_href)
+            goto_and_ready(next_url)
+            page_index += 1
         time.sleep(delay)
+
+    # 增量模式：记录最后处理页
+    if incremental and checkpoint_path:
+        try:
+            last_page_done = page_index - (1 if numeric_mode else 0)
+            save_json({"last_page": max(last_page_done, 1)}, checkpoint_path)
+        except Exception:
+            pass
+
     return links
 
 
@@ -483,8 +544,14 @@ def crawl_catalog_with_playwright(
     delay: float = 0.7,
     out_dir: str = "etmoc_output",
     pages_limit: int = 0,
+    start_page: int | str | None = None,
+    incremental: bool = False,
 ):
-    ensure_clean_out(out_dir)
+    if incremental:
+        os.makedirs(out_dir, exist_ok=True)
+        os.makedirs(os.path.join(out_dir, "images"), exist_ok=True)
+    else:
+        ensure_clean_out(out_dir)
     products = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -496,7 +563,13 @@ def crawl_catalog_with_playwright(
         session.headers.update(HEADERS)
         cookies_to_requests(session, context.cookies())
         links = collect_catalog_links(
-            page, pages_limit=pages_limit, delay=delay, limit=limit
+            page,
+            pages_limit=pages_limit,
+            delay=delay,
+            limit=limit,
+            start_page=start_page,
+            incremental=incremental,
+            out_dir=out_dir,
         )
         print(f"目录页链接合计：{len(links)}")
         pb = tqdm(total=len(links), desc="详情解析", unit="项", dynamic_ncols=True)
@@ -522,8 +595,14 @@ def crawl_catalog_links(
     pages_limit: int = 0,
     limit: int = 0,
     delay: float = 0.7,
+    start_page: int | str | None = None,
+    incremental: bool = False,
 ):
-    ensure_clean_out(out_dir)
+    if incremental:
+        os.makedirs(out_dir, exist_ok=True)
+        os.makedirs(os.path.join(out_dir, "images"), exist_ok=True)
+    else:
+        ensure_clean_out(out_dir)
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(user_agent=HEADERS["User-Agent"])
@@ -531,7 +610,13 @@ def crawl_catalog_links(
         page.set_default_navigation_timeout(45000)
         page.set_default_timeout(45000)
         links = collect_catalog_links(
-            page, pages_limit=pages_limit, delay=delay, limit=limit
+            page,
+            pages_limit=pages_limit,
+            delay=delay,
+            limit=limit,
+            start_page=start_page,
+            incremental=incremental,
+            out_dir=out_dir,
         )
         browser.close()
     out = {"count": len(links), "links": links}
@@ -553,6 +638,17 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="分页上限；传 all 表示不限；未提供默认 1 页",
+    )
+    ap.add_argument(
+        "--start-page",
+        type=str,
+        default=None,
+        help="分页起始页；传整数或 latest（从检查点继续）",
+    )
+    ap.add_argument(
+        "--incremental",
+        action="store_true",
+        help="启用增量模式（默认关注前几页；若需从检查点继续请配合 --start-page latest）",
     )
     ap.add_argument(
         "--source", type=str, choices=["catalog", "brands"], default="catalog"
@@ -587,6 +683,8 @@ if __name__ == "__main__":
                 pages_limit=pages_limit,
                 limit=args.limit,
                 delay=args.delay,
+                start_page=args.start_page,
+                incremental=args.incremental,
             )
         else:
             crawl_catalog_with_playwright(
@@ -594,6 +692,8 @@ if __name__ == "__main__":
                 delay=args.delay,
                 out_dir=args.out,
                 pages_limit=pages_limit,
+                start_page=args.start_page,
+                incremental=args.incremental,
             )
     else:
         crawl_with_playwright(
