@@ -32,7 +32,7 @@ jobs:
 
       - name: Run scraper (catalog detail, 1 page) via uv
         run: |
-          uv run python playwright_scrape_etmoc.py --pages all
+          uv run python playwright_scrape_etmoc.py --pages all --incremental 
 
       - name: Commit and push results
         run: |

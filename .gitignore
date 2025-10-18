@@ -218,8 +218,8 @@ __marimo__/
 
 # --- Project-specific ---
 # Generated scrape outputs and artifacts
-etmoc_output/
-etmoc_output/**
+# etmoc_output/
+# etmoc_output/**
 
 # Playwright reports (if tests are added later)
 playwright-report/
