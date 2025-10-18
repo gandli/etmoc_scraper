@@ -504,9 +504,20 @@ def collect_catalog_links(
     )
     numeric_mode = start_page is not None or incremental  # 数值分页模式：显式起始页或增量模式
 
-    def goto_and_ready(url: str):
-        page.goto(url, wait_until="domcontentloaded")
-        wait_for_catalog_ready(page)
+    def goto_and_ready(url: str) -> bool:
+        try:
+            page.goto(url, wait_until="domcontentloaded")
+        except PlaywrightTimeoutError:
+            print(f"页面跳转超时，结束当前抓取：{url}")
+            page.wait_for_timeout(800)
+            return False
+        try:
+            wait_for_catalog_ready(page)
+        except PlaywrightTimeoutError:
+            print(f"目录选择器等待超时，跳过当前页：{url}")
+            page.wait_for_timeout(800)
+            return False
+        return True
 
     # 总页数检测（目录首页）
     total_pages = get_total_pages_number(page, root_url)
@@ -534,7 +545,9 @@ def collect_catalog_links(
         # incremental 且未显式设置 start_page 时，默认从 1 开始
         page_index = max(sp, 1)
     else:
-        goto_and_ready(root_url)
+        if not goto_and_ready(root_url):
+            print("目录首页无法加载，提前结束。")
+            return []
         page_index = 1
 
     seen = set()
@@ -547,7 +560,9 @@ def collect_catalog_links(
             break
         if numeric_mode:
             page_url = f"{root_url}?page={page_index}"
-            goto_and_ready(page_url)
+            if not goto_and_ready(page_url):
+                print(f"分页跳转失败或超时，结束于第 {page_index} 页。")
+                break
         html = page.content()
         soup = BeautifulSoup(html, "html.parser")
         anchors = soup.select(SELECTORS["product_links_in_catalog"])
@@ -584,7 +599,9 @@ def collect_catalog_links(
             if not next_href:
                 break
             next_url = urljoin(page.url, next_href)
-            goto_and_ready(next_url)
+            if not goto_and_ready(next_url):
+                print(f"下一页加载失败或超时，结束于第 {page_index} 页。")
+                break
             page_index += 1
         time.sleep(delay)
 
