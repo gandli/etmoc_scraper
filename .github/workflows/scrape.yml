@@ -8,9 +8,7 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-22.04
-    defaults:
-      run:
-        working-directory: etmoc_scraper
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -40,4 +38,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: etmoc_output
-          path: etmoc_scraper/etmoc_output
+          path: etmoc_output
