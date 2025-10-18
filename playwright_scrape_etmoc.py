@@ -264,6 +264,65 @@ def extract_info(soup: BeautifulSoup) -> dict:
     return clean_info_values(info)
 
 
+# 共享工具函数：标题解析、构建 item、通用等待与图片下载
+
+def get_title_from_soup(soup: BeautifulSoup) -> str:
+    h2 = soup.select_one(SELECTORS["product_title"])
+    return (
+        text_clean(h2.get_text(" "))
+        if h2
+        else text_clean((soup.title.string if soup.title else "") or "")
+    )
+
+
+def build_item_from_soup(soup: BeautifulSoup, page_url: str) -> dict:
+    title = get_title_from_soup(soup)
+    values = extract_info(soup)
+    images = parse_images(soup, page_url)
+    return {"title": title, "url": page_url, "info": values, "images": images}
+
+
+def wait_for_selector_safe(page, selector: str, timeout: int = 15000):
+    try:
+        page.wait_for_load_state("domcontentloaded")
+        page.wait_for_selector(selector, timeout=timeout)
+    except PlaywrightTimeoutError:
+        page.wait_for_timeout(1200)
+
+
+def download_image(
+    session: requests.Session, img_url: str, out_dir_images: str
+) -> str | None:
+    try:
+        name = re.sub(
+            r"[^a-zA-Z0-9._-]",
+            "_",
+            urlparse(img_url).path.split("/")[-1] or "image.jpg",
+        )
+        path = os.path.join(out_dir_images, name)
+        if not os.path.exists(path):
+            r = session.get(img_url, timeout=30)
+            if r.status_code == 200:
+                with open(path, "wb") as f:
+                    f.write(r.content)
+        return path if os.path.exists(path) else None
+    except Exception as e:
+        print("图片下载异常", e)
+        return None
+
+
+def download_images_for_items(items: list[dict], session: requests.Session, out_dir: str):
+    out_dir_images = os.path.join(out_dir, "images")
+    os.makedirs(out_dir_images, exist_ok=True)
+    for it in items:
+        imgs = it.get("images") or []
+        if not imgs:
+            continue
+        local = download_image(session, imgs[0], out_dir_images)
+        if local:
+            it["image_local"] = local
+
+
 def crawl_with_playwright(
     limit: int = None, delay: float = 0.5, out_dir: str = "etmoc_output"
 ):
@@ -339,42 +398,15 @@ def crawl_with_playwright(
             page.wait_for_load_state("networkidle")
             ph = page.content()
             soup = BeautifulSoup(ph, "html.parser")
-            h2 = soup.select_one(SELECTORS["product_title"])
-            title = (
-                text_clean(h2.get_text(" "))
-                if h2
-                else text_clean((soup.title.string if soup.title else "") or "")
-            )
-            values = extract_info(soup)
-            images = parse_images(soup, pu)
-            it = {"url": pu, "title": title, "info": values, "images": images}
+            it = build_item_from_soup(soup, pu)
             items.append(it)
-            tqdm.write(f"[{i}/{len(product_urls)}] {title}")
+            tqdm.write(f"[{i}/{len(product_urls)}] {it.get('title', '')}")
             pb.update(1)
             time.sleep(delay)
 
         pb.close()
         # 统一下载图片，避免解析阶段的网络阻塞
-        for it in items:
-            imgs = it.get("images") or []
-            if not imgs:
-                continue
-            try:
-                img_url = imgs[0]
-                name = re.sub(
-                    r"[^a-zA-Z0-9._-]",
-                    "_",
-                    urlparse(img_url).path.split("/")[-1] or "image.jpg",
-                )
-                path = os.path.join(out_dir, "images", name)
-                if not os.path.exists(path):
-                    r = session.get(img_url, timeout=30)
-                    if r.status_code == 200:
-                        with open(path, "wb") as f:
-                            f.write(r.content)
-                        it["image_local"] = path
-            except Exception as e:
-                print("图片下载异常", e)
+        download_images_for_items(items, session, out_dir)
         browser.close()
 
     save_json(items, os.path.join(out_dir, "products_playwright.json"))
@@ -383,19 +415,11 @@ def crawl_with_playwright(
 
 
 def wait_for_catalog_ready(page, timeout: int = 15000):
-    try:
-        page.wait_for_load_state("domcontentloaded")
-        page.wait_for_selector(SELECTORS["product_links_in_catalog"], timeout=timeout)
-    except PlaywrightTimeoutError:
-        page.wait_for_timeout(1200)
+    wait_for_selector_safe(page, SELECTORS["product_links_in_catalog"], timeout)
 
 
 def wait_for_product_ready(page, timeout: int = 15000):
-    try:
-        page.wait_for_load_state("domcontentloaded")
-        page.wait_for_selector(SELECTORS["wait_product_ready"], timeout=timeout)
-    except PlaywrightTimeoutError:
-        page.wait_for_timeout(1200)
+    wait_for_selector_safe(page, SELECTORS["wait_product_ready"], timeout)
 
 
 def collect_catalog_links(
@@ -448,15 +472,7 @@ def parse_product_item(
         page.wait_for_timeout(800)
     prod_html = page.content()
     soup = BeautifulSoup(prod_html, "html.parser")
-    h2 = soup.select_one(SELECTORS["product_title"])
-    title = (
-        text_clean(h2.get_text(" "))
-        if h2
-        else text_clean((soup.title.string if soup.title else "") or "")
-    )
-    values = extract_info(soup)
-    images = parse_images(soup, url)
-    item = {"title": title, "url": url, "info": values, "images": images}
+    item = build_item_from_soup(soup, url)
     # 统一下载图片移动到任务末尾
     time.sleep(delay)
     return item
@@ -494,26 +510,7 @@ def crawl_catalog_with_playwright(
                 print(f"详情解析失败: {link} -> {e}")
         pb.close()
         # 统一下载图片，避免解析阶段的网络阻塞
-        for it in products:
-            imgs = it.get("images") or []
-            if not imgs:
-                continue
-            try:
-                img_url = imgs[0]
-                name = re.sub(
-                    r"[^a-zA-Z0-9._-]",
-                    "_",
-                    urlparse(img_url).path.split("/")[-1] or "image.jpg",
-                )
-                path = os.path.join(out_dir, "images", name)
-                if not os.path.exists(path):
-                    r = session.get(img_url, timeout=30)
-                    if r.status_code == 200:
-                        with open(path, "wb") as f:
-                            f.write(r.content)
-                        it["image_local"] = path
-            except Exception as e:
-                print("图片下载异常", e)
+        download_images_for_items(products, session, out_dir)
         browser.close()
     save_json(products, os.path.join(out_dir, "products_catalog.json"))
     save_csv(products, os.path.join(out_dir, "products_catalog.csv"))
@@ -604,39 +601,3 @@ if __name__ == "__main__":
         )
 
 # 集中管理所有路径选择器，方便后续统一修改
-SELECTORS = {
-    "catalog_left_col": "body > div.container > div.row > div.col-8",
-    "product_links_in_catalog": 'body > div.container > div.row > div.col-8 > ul a[href*="Product?Id="]',
-    "product_title": "div.brand-title > h2",
-    "image": "div.proImg img[src]",
-    "pro_bar": "div.proBars div.proBar",
-    "wait_product_ready": "div.brand-title > h2, h1, .title, .product-title",
-}
-PAGINATION_CANDIDATES = [
-    'nav.pagination a[rel="next"]',
-    "ul.pagination li.next a",
-    ".pagination a.next",
-    ".pager a.next",
-]
-NEXT_TEXT_REGEX = r"(下一页|下页|›|»)"  # 分页“下一页”文本匹配
-
-
-def select_next_page_href(soup: BeautifulSoup):
-    root = soup.select_one(SELECTORS["catalog_left_col"]) or soup
-    # 优先使用精确的分页候选选择器
-    for sel in PAGINATION_CANDIDATES:
-        a = root.select_one(sel)
-        if a and a.has_attr("href"):
-            return a["href"]
-    # 结构化兜底：分页容器最后一个链接
-    a2 = root.select_one(".pagination a[href]:last-child")
-    if a2 and a2.has_attr("href"):
-        href = a2["href"]
-        if href and not re.search(r"javascript:", href, re.I):
-            return href
-    # 文本兜底：限制在左列 root 中查找“下一页/下页/›/»”
-    for a in root.find_all("a", href=True):
-        txt = text_clean(a.get_text(" "))
-        if re.search(NEXT_TEXT_REGEX, txt):
-            return a["href"]
-    return None
