@@ -1,0 +1,12 @@
+[project]
+name = "etmoc-scraper"
+version = "0.1.0"
+description = "从 http://www.etmoc.com/ 烟草市场爬取产品信息"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "playwright>=1.43",
+    "beautifulsoup4>=4.12",
+    "requests>=2.31",
+    "tqdm>=4.66",
+]

@@ -348,30 +348,33 @@ def crawl_with_playwright(
             values = extract_info(soup)
             images = parse_images(soup, pu)
             it = {"url": pu, "title": title, "info": values, "images": images}
-            if images:
-                try:
-                    img_url = images[0]
-                    name = re.sub(
-                        r"[^a-zA-Z0-9._-]",
-                        "_",
-                        urlparse(img_url).path.split("/")[-1] or "image.jpg",
-                    )
-                    path = os.path.join(out_dir, "images", name)
-                    if not os.path.exists(path):
-                        r = session.get(img_url, timeout=30)
-                        if r.status_code == 200:
-                            with open(path, "wb") as f:
-                                f.write(r.content)
-                            it["image_local"] = path
-                except Exception as e:
-                    print("图片下载异常", e)
-
             items.append(it)
             tqdm.write(f"[{i}/{len(product_urls)}] {title}")
             pb.update(1)
             time.sleep(delay)
 
         pb.close()
+        # 统一下载图片，避免解析阶段的网络阻塞
+        for it in items:
+            imgs = it.get("images") or []
+            if not imgs:
+                continue
+            try:
+                img_url = imgs[0]
+                name = re.sub(
+                    r"[^a-zA-Z0-9._-]",
+                    "_",
+                    urlparse(img_url).path.split("/")[-1] or "image.jpg",
+                )
+                path = os.path.join(out_dir, "images", name)
+                if not os.path.exists(path):
+                    r = session.get(img_url, timeout=30)
+                    if r.status_code == 200:
+                        with open(path, "wb") as f:
+                            f.write(r.content)
+                        it["image_local"] = path
+            except Exception as e:
+                print("图片下载异常", e)
         browser.close()
 
     save_json(items, os.path.join(out_dir, "products_playwright.json"))
@@ -454,23 +457,7 @@ def parse_product_item(
     values = extract_info(soup)
     images = parse_images(soup, url)
     item = {"title": title, "url": url, "info": values, "images": images}
-    if images:
-        try:
-            img_url = images[0]
-            name = re.sub(
-                r"[^a-zA-Z0-9._-]",
-                "_",
-                urlparse(img_url).path.split("/")[-1] or "image.jpg",
-            )
-            path = os.path.join(out_dir, "images", name)
-            if not os.path.exists(path):
-                r = session.get(img_url, timeout=30)
-                if r.status_code == 200:
-                    with open(path, "wb") as f:
-                        f.write(r.content)
-                    item["image_local"] = path
-        except Exception as e:
-            print("图片下载异常", e)
+    # 统一下载图片移动到任务末尾
     time.sleep(delay)
     return item
 
@@ -506,6 +493,27 @@ def crawl_catalog_with_playwright(
             except Exception as e:
                 print(f"详情解析失败: {link} -> {e}")
         pb.close()
+        # 统一下载图片，避免解析阶段的网络阻塞
+        for it in products:
+            imgs = it.get("images") or []
+            if not imgs:
+                continue
+            try:
+                img_url = imgs[0]
+                name = re.sub(
+                    r"[^a-zA-Z0-9._-]",
+                    "_",
+                    urlparse(img_url).path.split("/")[-1] or "image.jpg",
+                )
+                path = os.path.join(out_dir, "images", name)
+                if not os.path.exists(path):
+                    r = session.get(img_url, timeout=30)
+                    if r.status_code == 200:
+                        with open(path, "wb") as f:
+                            f.write(r.content)
+                        it["image_local"] = path
+            except Exception as e:
+                print("图片下载异常", e)
         browser.close()
     save_json(products, os.path.join(out_dir, "products_catalog.json"))
     save_csv(products, os.path.join(out_dir, "products_catalog.csv"))
