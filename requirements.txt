@@ -1,0 +1,4 @@
+playwright>=1.43
+beautifulsoup4>=4.12
+requests>=2.31
+tqdm>=4.66
