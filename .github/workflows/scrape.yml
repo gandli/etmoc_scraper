@@ -5,6 +5,13 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
+concurrency:
+  group: etmoc_scraper-updates
+  cancel-in-progress: true
+
 jobs:
   scrape:
     runs-on: ubuntu-22.04
@@ -12,6 +19,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -34,14 +43,43 @@ jobs:
         run: |
           uv run python playwright_scrape_etmoc.py --pages all --incremental 
 
-      - name: Commit and push results
+      - name: Commit changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add etmoc_output
+          git add -A
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "chore(scrape): update etmoc_output on $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-            git push
+            git commit -m "chore(scrape): update etmoc_output on $(date -u +%FT%TZ)"
           fi
+
+      - name: Rebase and push with retry
+        env:
+          BRANCH: main
+        run: |
+          set -euo pipefail
+          echo "Fetching latest $BRANCH"
+          git fetch origin "$BRANCH"
+
+          echo "Rebasing onto origin/$BRANCH"
+          git rebase "origin/$BRANCH"
+
+          echo "Pushing to $BRANCH with retries"
+          for attempt in 1 2 3; do
+            echo "Push attempt $attempt..."
+            if git push origin HEAD:"$BRANCH"; then
+              echo "Push succeeded on attempt $attempt"
+              break
+            else
+              if [ "$attempt" -eq 3 ]; then
+                echo "Push failed after 3 attempts. Please check concurrent runs or repository rules."
+                exit 1
+              fi
+              echo "Push rejected. Sleeping before retry..."
+              sleep $((attempt * 5))
+              echo "Fetching and rebasing again before retry..."
+              git fetch origin "$BRANCH"
+              git rebase "origin/$BRANCH"
+            fi
+          done
