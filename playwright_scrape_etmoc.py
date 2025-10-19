@@ -121,11 +121,34 @@ def cookies_to_requests(session: requests.Session, pw_cookies: list):
             session.cookies.set(c["name"], c["value"], path=c.get("path", "/"))
 
 
+def enable_resource_blocking(context, blocked_types: set | None = None, intercepted_images: set | None = None):
+    """启用路由拦截，阻止重资源请求；可记录被拦截的图片 URL。
+    返回用于累积图片 URL 的集合（若未提供则返回新集合）。
+    """
+    if blocked_types is None:
+        blocked_types = {"image", "media", "font", "stylesheet"}
+    images_set = intercepted_images if intercepted_images is not None else set()
+
+    def handle(route, request):
+        rtype = request.resource_type
+        if rtype in blocked_types:
+            try:
+                if rtype == "image":
+                    images_set.add(request.url)
+            except Exception:
+                pass
+            return route.abort()
+        return route.continue_()
+
+    context.route("**/*", handle)
+    return images_set
+
+
 def hex_str(s: str) -> str:
     return "".join(f"{ord(c):x}" for c in s)
 
 
-def ensure_clean_out(out_dir: str):
+def ensure_clean_out(out_dir: str, create_images_dir: bool = True):
     if os.path.isdir(out_dir):
         for name in os.listdir(out_dir):
             path = os.path.join(out_dir, name)
@@ -137,7 +160,8 @@ def ensure_clean_out(out_dir: str):
             except Exception as e:
                 print(f"清理失败 {path}: {e}")
     os.makedirs(out_dir, exist_ok=True)
-    os.makedirs(os.path.join(out_dir, "images"), exist_ok=True)
+    if create_images_dir:
+        os.makedirs(os.path.join(out_dir, "images"), exist_ok=True)
 
 
 def save_json(items: list, path: str):
@@ -168,6 +192,121 @@ def parse_images(soup: BeautifulSoup, page_url: str) -> list:
     if not src:
         return []
     return [urljoin(page_url, src)]
+
+
+def extract_image_urls(page, intercepted_images: set | None = None) -> list[str]:
+    """从页面提取图片 URL：
+    - <img> 的 src、data-src/data-original/data-lazy、srcset 最大密度候选
+    - 行内样式与计算样式中的 background-image:url(...)
+    - 与拦截到的图片请求 URL 合并去重
+    返回绝对 URL 列表。
+    """
+    js = r"""
+    () => {
+      const urls = new Set();
+      const toAbs = (u) => {
+        if (!u) return null;
+        try { return new URL(u, location.href).href; } catch { return null; }
+      };
+      const add = (u) => {
+        const h = toAbs(u);
+        if (!h) return;
+        if (h.startsWith('data:')) return;
+        urls.add(h.split('#')[0]);
+      };
+      const imgs = Array.from(document.querySelectorAll('img'));
+      for (const img of imgs) {
+        add(img.getAttribute('src'));
+        const ds = ['data-src','data-original','data-lazy','data-url'];
+        for (const k of ds) {
+          const v = img.getAttribute(k);
+          if (v) add(v);
+        }
+        const srcset = img.getAttribute('srcset') || img.getAttribute('data-srcset');
+        if (srcset) {
+          const candidates = srcset.split(',').map(s=>s.trim()).filter(Boolean).map(part=>{
+            const m = part.split(/\s+/);
+            return { url: m[0], d: m[1] || '' };
+          });
+          if (candidates.length) {
+            const score = (c) => {
+              const mm = (c.d||'').match(/(\d+(?:\.\d+)?)(x|w)/i);
+              return mm ? parseFloat(mm[1]) : 0;
+            };
+            let best = candidates[0];
+            for (const c of candidates) {
+              if (score(c) > score(best)) best = c;
+            }
+            add(best.url);
+          }
+        }
+      }
+
+      const styleUrlRegex = /url\((['"]?)(.*?)\1\)/gi;
+      const getBgUrls = (s) => {
+        const arr = [];
+        if (!s) return arr;
+        let m;
+        while ((m = styleUrlRegex.exec(s))) {
+          const u = m[2];
+          if (!u || u.startsWith('data:')) continue;
+          arr.push(u);
+        }
+        return arr;
+      };
+      const all = Array.from(document.querySelectorAll('*'));
+      for (const el of all) {
+        const style = el.getAttribute('style') || '';
+        getBgUrls(style).forEach(add);
+        try {
+          const cs = window.getComputedStyle(el);
+          const bg = cs && cs.backgroundImage;
+          if (bg && bg !== 'none') getBgUrls(bg).forEach(add);
+        } catch {}
+      }
+      return Array.from(urls);
+    }
+    """
+    try:
+        urls: list[str] = page.evaluate(js)
+    except Exception:
+        urls = []
+    # 合并拦截到的图片请求
+    if intercepted_images:
+        try:
+            urls.extend(list(intercepted_images))
+        except Exception:
+            pass
+    # 规范化、去重
+    seen = set()
+    out: list[str] = []
+    for u in urls:
+        if not u:
+            continue
+        try:
+            abs_u = urljoin(page.url, u)
+        except Exception:
+            abs_u = u
+        abs_u = abs_u.split('#')[0]
+        if abs_u not in seen:
+            seen.add(abs_u)
+            out.append(abs_u)
+    return out
+
+
+def extract_text_content(page) -> str:
+    """提取页面主体文本（col-8 容器或 body），压缩空白。"""
+    root_sel = SELECTORS.get("catalog_left_col") or "body"
+    try:
+        txt = page.evaluate(
+            f"() => ((document.querySelector('{root_sel}') || document.body).innerText || '')"
+        )
+    except Exception:
+        try:
+            txt = page.evaluate("() => document.body.innerText || ''")
+        except Exception:
+            txt = ""
+    return text_clean(txt)
 
 
 def clean_time_value(v: str) -> str:
@@ -320,7 +459,7 @@ def download_images_for_items(items: list[dict], session: requests.Session, out_
     out_dir_images = os.path.join(out_dir, "images")
     os.makedirs(out_dir_images, exist_ok=True)
     for it in items:
-        imgs = it.get("images") or []
+        imgs = it.get("image_urls") or it.get("images") or []
         if not imgs:
             continue
         local = download_image(session, imgs[0], out_dir_images)
@@ -329,13 +468,21 @@ def download_images_for_items(items: list[dict], session: requests.Session, out_
 
 
 def crawl_with_playwright(
-    limit: int = None, delay: float = 0.5, out_dir: str = "etmoc_output"
+    limit: int = None,
+    delay: float = 0.5,
+    out_dir: str = "etmoc_output",
+    block_resources: bool = True,
+    download_images: bool = False,
 ):
-    ensure_clean_out(out_dir)
+    ensure_clean_out(out_dir, create_images_dir=download_images)
     items = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(user_agent=HEADERS["User-Agent"])
+        # 路由拦截：默认阻断重资源
+        intercepted_images = set()
+        if block_resources:
+            intercepted_images = enable_resource_blocking(context, intercepted_images=intercepted_images)
         page = context.new_page()
 
         # 预置 cookie 并触发校验 URL
@@ -354,10 +501,9 @@ def crawl_with_playwright(
             "(()=>{const s=`${screen.width},${screen.height}`;return Array.from(s).map(c=>c.charCodeAt(0).toString(16)).join('')})()"
         )
         page.goto(
-            f"{BASE}/Firms/BrandAll?security_verify_data={sv_hex}", wait_until="load"
+            f"{BASE}/Firms/BrandAll?security_verify_data={sv_hex}", wait_until="domcontentloaded"
         )
         page.wait_for_timeout(1500)
-        page.wait_for_load_state("networkidle")
         brand_html = page.content()
         with open(os.path.join(out_dir, "brand_all.html"), "w", encoding="utf-8") as f:
             f.write(brand_html)
@@ -380,8 +526,7 @@ def crawl_with_playwright(
             if "Product?Id=" in b:
                 product_urls.append(b)
                 continue
-            page.goto(b, wait_until="load")
-            page.wait_for_load_state("networkidle")
+            page.goto(b, wait_until="domcontentloaded")
             bh = page.content()
             product_urls.extend(
                 to_abs(page.url, find_links(bh, r"(?i)Product\?Id=\d+"))
@@ -399,19 +544,33 @@ def crawl_with_playwright(
         )
 
         for i, pu in enumerate(product_urls, 1):
-            page.goto(pu, wait_until="load")
-            page.wait_for_load_state("networkidle")
+            before_intercepts = set(intercepted_images)
+            page.goto(pu, wait_until="domcontentloaded")
             ph = page.content()
             soup = BeautifulSoup(ph, "html.parser")
             it = build_item_from_soup(soup, pu)
+            # 补充文本与图片 URL（不下载图片）
+            try:
+                only_new = set(intercepted_images) - before_intercepts
+                it["image_urls"] = extract_image_urls(page, only_new)
+            except Exception:
+                it["image_urls"] = []
+            try:
+                it["text_content"] = extract_text_content(page)
+            except Exception:
+                it["text_content"] = ""
+            # 兼容旧字段：若 images 为空，用 image_urls 的首个填充
+            if (not it.get("images")) and it.get("image_urls"):
+                it["images"] = [it["image_urls"][0]]
             items.append(it)
             tqdm.write(f"[{i}/{len(product_urls)}] {it.get('title', '')}")
             pb.update(1)
             time.sleep(delay)
 
         pb.close()
-        # 统一下载图片，避免解析阶段的网络阻塞
-        download_images_for_items(items, session, out_dir)
+        # 可选图片下载（默认关闭）
+        if download_images:
+            download_images_for_items(items, session, out_dir)
         browser.close()
 
     save_json(items, os.path.join(out_dir, "products_playwright.json"))
@@ -617,8 +776,15 @@ def collect_catalog_links(
 
 
 def parse_product_item(
-    page, session: requests.Session, url: str, out_dir: str, delay: float = 0.7
+    page,
+    session: requests.Session,
+    url: str,
+    out_dir: str,
+    delay: float = 0.7,
+    intercepted_images: set | None = None,
 ):
+    # 记录拦截集合快照，便于提取当前页面新增的图片请求
+    before_intercepts = set(intercepted_images) if intercepted_images is not None else None
     try:
         page.goto(url, wait_until="domcontentloaded")
         wait_for_product_ready(page)
@@ -627,6 +793,21 @@ def parse_product_item(
     prod_html = page.content()
     soup = BeautifulSoup(prod_html, "html.parser")
     item = build_item_from_soup(soup, url)
+    # 新增：文本与图片 URL 提取
+    try:
+        only_new = None
+        if before_intercepts is not None and intercepted_images is not None:
+            only_new = set(intercepted_images) - before_intercepts
+        item["image_urls"] = extract_image_urls(page, only_new)
+    except Exception:
+        item["image_urls"] = []
+    try:
+        item["text_content"] = extract_text_content(page)
+    except Exception:
+        item["text_content"] = ""
+    # 兼容旧字段：若 images 为空，用 image_urls 的首个填充
+    if (not item.get("images")) and item.get("image_urls"):
+        item["images"] = [item["image_urls"][0]]
     # 统一下载图片移动到任务末尾
     time.sleep(delay)
     return item
@@ -639,6 +820,8 @@ def crawl_catalog_with_playwright(
     pages_limit: int = 0,
     start_page: int | str | None = None,
     incremental: bool = False,
+    block_resources: bool = True,
+    download_images: bool = False,
 ):
     """目录源：先收集产品链接，再解析详情并下载图片。
     参数：同 `collect_catalog_links` 的分页/起始/增量语义；另含 `limit/delay/out_dir`。
@@ -650,13 +833,18 @@ def crawl_catalog_with_playwright(
     """
     if incremental:
         os.makedirs(out_dir, exist_ok=True)
-        os.makedirs(os.path.join(out_dir, "images"), exist_ok=True)
+        if download_images:
+            os.makedirs(os.path.join(out_dir, "images"), exist_ok=True)
     else:
-        ensure_clean_out(out_dir)
+        ensure_clean_out(out_dir, create_images_dir=download_images)
     products = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(user_agent=HEADERS["User-Agent"])
+        # 路由拦截：默认阻断重资源
+        intercepted_images = set()
+        if block_resources:
+            intercepted_images = enable_resource_blocking(context, intercepted_images=intercepted_images)
         page = context.new_page()
         page.set_default_navigation_timeout(45000)
         page.set_default_timeout(45000)
@@ -676,15 +864,16 @@ def crawl_catalog_with_playwright(
         pb = tqdm(total=len(links), desc="详情解析", unit="项", dynamic_ncols=True)
         for i, link in enumerate(links, 1):
             try:
-                item = parse_product_item(page, session, link, out_dir, delay)
+                item = parse_product_item(page, session, link, out_dir, delay, intercepted_images)
                 products.append(item)
                 tqdm.write(f"[{i}/{len(links)}] 已解析：{item.get('title', '')}")
                 pb.update(1)
             except Exception as e:
                 print(f"详情解析失败: {link} -> {e}")
         pb.close()
-        # 统一下载图片，避免解析阶段的网络阻塞
-        download_images_for_items(products, session, out_dir)
+        # 可选图片下载（默认关闭）
+        if download_images:
+            download_images_for_items(products, session, out_dir)
         browser.close()
     save_json(products, os.path.join(out_dir, "products_catalog.json"))
     save_csv(products, os.path.join(out_dir, "products_catalog.csv"))
@@ -698,6 +887,7 @@ def crawl_catalog_links(
     delay: float = 0.7,
     start_page: int | str | None = None,
     incremental: bool = False,
+    block_resources: bool = True,
 ):
     """仅收集目录页的产品链接（不解析详情），用于快速预览或链路检查。
     行为：
@@ -707,12 +897,13 @@ def crawl_catalog_links(
     """
     if incremental:
         os.makedirs(out_dir, exist_ok=True)
-        os.makedirs(os.path.join(out_dir, "images"), exist_ok=True)
     else:
-        ensure_clean_out(out_dir)
+        ensure_clean_out(out_dir, create_images_dir=False)
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(user_agent=HEADERS["User-Agent"])
+        if block_resources:
+            enable_resource_blocking(context)
         page = context.new_page()
         page.set_default_navigation_timeout(45000)
         page.set_default_timeout(45000)
@@ -767,6 +958,19 @@ if __name__ == "__main__":
         default="detail",
         help="catalog 源的动作：list 仅收集链接，detail 解析详情",
     )
+
+    # 资源拦截（默认启用）
+    br = ap.add_mutually_exclusive_group()
+    br.add_argument("--block-resources", dest="block_resources", action="store_true", help="拦截 image/media/font/stylesheet 等重资源")
+    br.add_argument("--no-block-resources", dest="block_resources", action="store_false", help="不拦截资源（对照测试）")
+    ap.set_defaults(block_resources=True)
+
+    # 图片下载（默认不下载）
+    di = ap.add_mutually_exclusive_group()
+    di.add_argument("--download-images", dest="download_images", action="store_true", help="下载图片到本地 images 目录")
+    di.add_argument("--no-download-images", dest="download_images", action="store_false", help="不下载图片，仅输出 image_urls")
+    ap.set_defaults(download_images=False)
+
     args = ap.parse_args()
 
     # 计算分页上限：`--pages` 优先；支持整数或 `all`；默认 1 页。`all` 仍受站点总页数边界约束。
@@ -792,6 +996,7 @@ if __name__ == "__main__":
                 delay=args.delay,
                 start_page=args.start_page,
                 incremental=args.incremental,
+                block_resources=args.block_resources,
             )
         else:
             crawl_catalog_with_playwright(
@@ -801,9 +1006,15 @@ if __name__ == "__main__":
                 pages_limit=pages_limit,
                 start_page=args.start_page,
                 incremental=args.incremental,
+                block_resources=args.block_resources,
+                download_images=args.download_images,
             )
     else:
         crawl_with_playwright(
-            limit=args.limit or None, delay=args.delay, out_dir=args.out
+            limit=args.limit or None,
+            delay=args.delay,
+            out_dir=args.out,
+            block_resources=args.block_resources,
+            download_images=args.download_images,
         )
 
